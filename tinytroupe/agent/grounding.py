@@ -224,7 +224,8 @@ class BaseSemanticGroundingConnector(GroundingConnector):
                 # because Document is a Pydantic model and direct assignment may raise
                 # a ValidationError depending on the Pydantic/llama-index version.
                 sanitized_text = utils.sanitize_raw_string(document.text)
-                document = self.clone_document_with_new_text(document, sanitized_text)
+                if sanitized_text != document.text:
+                    document = self.clone_document_with_new_text(document, sanitized_text)
 
                 logger.debug(f"Document text after sanitization: {document.text}")
 
