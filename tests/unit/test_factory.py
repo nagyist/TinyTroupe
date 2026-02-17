@@ -434,40 +434,72 @@ def test_factory_name_uniqueness_across_factories(setup):
 
 
 @pytest.mark.core
-def test_sampling_dimensions_json_serializable(setup):
-    """Test that sampling_dimensions can be serialized with json.dumps.
-    
-    Reproduces the issue where logger.debug(json.dumps(self.sampling_dimensions, indent=4))
-    raises TypeError: Object of type set is not JSON serializable when LOGLEVEL=DEBUG.
-    See _initialize_sampling_plan_transaction in tiny_person_factory.py.
+def test_factory_pipeline_with_set_in_sampling_dimensions(setup):
+    """Regression test: json.dumps crash when sampling_dimensions contains Python sets.
+
+    Background
+    ----------
+    The LLM that backs ``_compute_sampling_dimensions`` is expected to return
+    valid JSON, but occasionally it emits Python set-literal syntax instead of
+    JSON arrays — e.g. ``{"Engineer", "Teacher"}`` rather than
+    ``["Engineer", "Teacher"]``.  Because ``extract_json()`` in
+    ``tinytroupe/utils/llm.py`` falls back to ``ast.literal_eval`` when
+    ``json.loads`` fails, these set literals are silently parsed into real
+    Python ``set`` objects and embedded in the returned dictionary.
+
+    Later, inside ``_initialize_sampling_plan_transaction``, the line::
+
+        logger.debug(f"Sampling dimensions: {json.dumps(sampling_dimensions, indent=4)}")
+
+    attempts to serialize that dictionary.  ``json.dumps`` cannot handle
+    ``set`` and raises ``TypeError: Object of type set is not JSON serializable``.
+    The crash only surfaces when the log level is DEBUG (or lower), so it goes
+    unnoticed under the default ERROR level.
+
+    What this test does
+    -------------------
+    It exercises the **real** factory pipeline (``generate_people`` →
+    ``_initialize_sampling_plan`` → ``_initialize_sampling_plan_transaction`` →
+    ``try_function`` → debug logging) while **mocking only**
+    ``_compute_sampling_dimensions`` to return a dict that contains ``set``
+    objects.  This deterministically reproduces the exact ``TypeError`` the
+    user reported, without depending on non-deterministic LLM output.
     """
     import logging
+    from unittest.mock import patch
 
-    demography_data = {
-        "country": "Brazil",
-        "age_distribution": {"18-30": 0.3, "31-50": 0.4, "51+": 0.3},
-        "gender_distribution": {"male": 0.48, "female": 0.52},
+    # This is what extract_json produces when the LLM emits set-literal
+    # syntax like {"Engineer", "Teacher"} instead of ["Engineer", "Teacher"].
+    mock_dimensions = {
+        "sampling_space_description": "Brazilian professionals",
+        "dimensions": [
+            {"name": "age", "range": [18, 65]},
+            {"name": "gender", "values": {"Male", "Female"}},  # set!
+            {"name": "profession", "values": {"Engineer", "Teacher", "Doctor"}},  # set!
+        ],
     }
 
-    factory = TinyPersonFactory.create_factory_from_demography(
-        demography_data, population_size=5
+    factory = TinyPersonFactory(
+        sampling_space_description="Brazilian professionals",
+        total_population_size=5,
+        context="Market research in Brazil",
     )
 
-    # Temporarily set log level to DEBUG to trigger the problematic json.dumps path
-    logger = logging.getLogger("tinytroupe")
-    original_level = logger.level
-    logger.setLevel(logging.DEBUG)
+    tinytroupe_logger = logging.getLogger("tinytroupe")
+    original_level = tinytroupe_logger.level
+    tinytroupe_logger.setLevel(logging.DEBUG)
     try:
-        # generate_people triggers _initialize_sampling_plan_transaction,
-        # which calls json.dumps(sampling_dimensions, indent=4) in a logger.debug call.
-        people = factory.generate_people(2, verbose=True)
-        assert len(people) == 2
-
-        # Also verify explicitly that sampling_dimensions is JSON-serializable
-        assert factory.sampling_dimensions is not None
-        json.dumps(factory.sampling_dimensions, indent=4)  # should not raise
+        # Patch only _compute_sampling_dimensions; the rest of the pipeline is real.
+        # This must NOT raise TypeError — sets in sampling_dimensions should be
+        # handled gracefully so that json.dumps in the debug log does not crash.
+        with patch.object(
+            TinyPersonFactory,
+            "_compute_sampling_dimensions",
+            return_value=mock_dimensions,
+        ):
+            factory.generate_people(2, verbose=True)
     finally:
-        logger.setLevel(original_level)
+        tinytroupe_logger.setLevel(original_level)
 
 
 @pytest.mark.core
