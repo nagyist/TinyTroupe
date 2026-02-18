@@ -1,28 +1,37 @@
-# Runs the TinyTroupe core test suite on every push/PR to main.
-# Core tests validate critical functionality and typically complete in ~1 hour.
-# Slow tests are excluded for faster CI feedback.
+# Runs the full TinyTroupe test suite (including slow tests).
+# Runs on the 1st of each month (if there were recent commits), or manually.
 #
 # Required secret:
 #   OPENAI_API_KEY — an OpenAI API key with access to the models configured
 #                    in config.ini (default: gpt-5-mini).
 
-name: Core Tests
+name: All Tests
 
 on:
-  push:
-    branches: [ "main", "development" ]
-  pull_request:
-    branches: [ "main", "development" ]
-  workflow_dispatch:          # allow manual triggering
+  schedule:
+    - cron: '0 6 1 * *'      # 1st of each month at 06:00 UTC
+  workflow_dispatch:          # manual trigger always available
 
 jobs:
-  core-tests:
+  all-tests:
     runs-on: ubuntu-latest
-    timeout-minutes: 180       # safeguard against runaway LLM calls
+    timeout-minutes: 360      # full suite can take several hours
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0      # full history needed for commit date check
+
+      - name: Skip if no commits in the last 30 days
+        if: github.event_name == 'schedule'
+        run: |
+          LAST_COMMIT=$(git log -1 --format=%ct)
+          THIRTY_DAYS_AGO=$(date -d '30 days ago' +%s)
+          if [ "$LAST_COMMIT" -lt "$THIRTY_DAYS_AGO" ]; then
+            echo "No commits in the last 30 days — skipping."
+            exit 1
+          fi
 
       - name: Set up Python 3.10
         uses: actions/setup-python@v5
@@ -39,22 +48,20 @@ jobs:
         uses: actions/cache@v4
         with:
           path: tests/openai_api_cache.pickle
-          # A unique key per run ensures the updated cache is always saved.
-          # restore-keys falls back to the most recent previous cache.
           key: openai-api-cache-${{ github.run_id }}
           restore-keys: |
             openai-api-cache-
 
-      - name: Run core tests
+      - name: Run all tests
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-        run: pytest -s --use_cache -m "core and not slow"
+        run: pytest -s --use_cache
 
       - name: Upload test results
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: test-results
+          name: test-results-all
           path: |
             test-results.xml
             test-report.html
